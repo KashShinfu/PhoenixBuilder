@@ -3,7 +3,7 @@ package builder
 import (
 	"compress/gzip"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	I18n "phoenixbuilder/fastbuilder/i18n"
 	"phoenixbuilder/fastbuilder/types"
@@ -29,7 +29,7 @@ func Schematic(config *types.MainConfig, blc chan *types.Module) error {
 		return err
 	}
 	defer gzip.Close()
-	buffer, err := ioutil.ReadAll(gzip)
+	buffer, err := io.ReadAll(gzip)
 
 	var SchematicModule struct {
 		Blocks    []byte `nbt:"Blocks"`
@@ -58,10 +58,9 @@ func Schematic(config *types.MainConfig, blc chan *types.Module) error {
 		Height int
 		Length int
 	}
-	FixedSchematicModule.Width = roundUpToNearestMultipleOf16(Size[0])
-	FixedSchematicModule.Height = Size[1]
-	FixedSchematicModule.Length = roundUpToNearestMultipleOf16(Size[2])
-	FixedSize := [3]int{FixedSchematicModule.Width, FixedSchematicModule.Height, FixedSchematicModule.Length}
+	var FixedSize [3]int
+	FixedSize = roundUpToNearestMultipleOf16(Size)
+	FixedSize[1] = Size[1]
 	FixedSchematicModule.Blocks = expandAndFillWithAir(SchematicModule.Blocks, Size, FixedSize)
 	FixedSchematicModule.Data = expandAndFillWithAir(SchematicModule.Data, Size, FixedSize)
 	chunks := detachChunks(FixedSize[0], FixedSize[1], FixedSize[2], config.Position.X, config.Position.Y, config.Position.Z, FixedSchematicModule.Blocks, FixedSchematicModule.Data)
@@ -89,15 +88,20 @@ func Schematic(config *types.MainConfig, blc chan *types.Module) error {
 	return nil
 }
 
-func roundUpToNearestMultipleOf16(num int) int { //向上舍入到最接近的 16 的倍数
-	remainder := num % 16
-	if remainder == 0 {
-		return num
+func roundUpToNearestMultipleOf16(arr [3]int) [3]int {
+	var result [3]int
+	for index, num := range arr {
+		remainder := num % 16
+		if remainder == 0 {
+			result[index] = num
+		} else {
+			result[index] = num + 16 - remainder
+		}
 	}
-	return num + 16 - remainder
+	return result
 }
 
-func expandAndFillWithAir(blocks []byte, original [3]int, new [3]int) []byte { //修补文件并填充空气
+func expandAndFillWithAir(blocks []byte, original [3]int, new [3]int) []byte {
 	newBlocks := make([]byte, new[0]*new[1]*new[2])
 	for y := 0; y < new[1]; y++ {
 		for z := 0; z < new[2]; z++ {
@@ -113,19 +117,27 @@ func expandAndFillWithAir(blocks []byte, original [3]int, new [3]int) []byte { /
 	return newBlocks
 }
 
-func detachChunks(width, height, length, X, Y, Z int, schBlocks, schData []byte) []ChunkModule { //拆分区块 这个地方不知道中了什么邪，改参数名就炸
-	size := 16
+func detachChunks(width, height, length, X, Y, Z int, schBlocks, schData []byte) []ChunkModule {
 	var chunks []ChunkModule
-	for z := 0; z < length; z += size {
-		for x := 0; x < width; x += size {
+	for z := 0; z < length; z += 16 {
+		for x := 0; x < width; x += 16 {
 			chunk := ChunkModule{
-				Position:     types.Position{X: x, Y: 0, Z: z},
-				Position_End: types.Position{X: x + size - 1, Y: height, Z: z + size - 1},
+				Blocks:       make([]byte, 0, 256*height),
+				Data:         make([]byte, 0, 256*height),
+				Position:     types.Position{X: x, Z: z},
+				Position_End: types.Position{X: x + 15, Y: height, Z: z + 15},
 			}
+			PrevBlockIndex := 0
 			for y2 := chunk.Position.Y; y2 <= chunk.Position_End.Y; y2++ {
 				for z2 := chunk.Position.Z; z2 <= chunk.Position_End.Z; z2++ {
 					for x2 := chunk.Position.X; x2 <= chunk.Position_End.X; x2++ {
-						BlockIndex := x2 + z2*width + y2*width*length
+						var BlockIndex int
+						if PrevBlockIndex == 0 {
+							BlockIndex = x2 + z2*width + y2*width*length
+						} else {
+							BlockIndex = PrevBlockIndex + 1
+							PrevBlockIndex = BlockIndex
+						}
 						if BlockIndex >= 0 && BlockIndex < len(schBlocks) {
 							chunk.Blocks = append(chunk.Blocks, schBlocks[BlockIndex])
 							chunk.Data = append(chunk.Data, schData[BlockIndex])
@@ -134,7 +146,7 @@ func detachChunks(width, height, length, X, Y, Z int, schBlocks, schData []byte)
 				}
 			}
 			chunk.Position = types.Position{X: X + x, Y: Y, Z: Z + z}
-			chunk.Position_End = types.Position{X: X + x + size - 1, Y: height + Y, Z: Z + z + size - 1}
+			chunk.Position_End = types.Position{X: X + x + 15, Y: height + Y, Z: Z + z + 15}
 			chunks = append(chunks, chunk)
 		}
 	}
